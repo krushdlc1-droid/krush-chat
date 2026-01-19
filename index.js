@@ -5,7 +5,8 @@ import crypto from "crypto";
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 
-/* ================= ADMIN ================= */
+/* ================= CONFIG ================= */
+const MESSAGE_COOLDOWN = 3000; // 3 секунды
 const ADMINS = ["HZeed", "Silv4ik", "Raze"];
 
 /* ================= LOG ================= */
@@ -25,9 +26,10 @@ function cypher(input) {
 }
 
 /* ================= STORAGE ================= */
-const prefixes = new Map();      // clientId -> prefix
-const users = new Map();         // clientId -> { ws, username }
-const mutes = new Map();         // username -> unmuteTimestamp
+const prefixes = new Map();        // clientId -> prefix
+const users = new Map();           // clientId -> username
+const lastMessage = new Map();     // username -> timestamp
+const mutes = new Map();           // username -> unmute time
 
 /* ================= FILTER ================= */
 const banned = [
@@ -39,11 +41,24 @@ const banned = [
 ];
 
 function normalize(text) {
-  return text.toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9\s]/gi, "");
+  return text
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^a-zа-я0-9\s]/gi, "");
 }
+
 function hasMotherInsult(text) {
   const n = normalize(text);
   return banned.some(p => n.includes(p));
+}
+
+/* ================= CAPS ================= */
+function antiCaps(text) {
+  const upper = text.replace(/[^A-ZА-Я]/g, "").length;
+  if (upper >= text.length * 0.6) {
+    return text.toLowerCase();
+  }
+  return text;
 }
 
 /* ================= WS ================= */
@@ -55,98 +70,35 @@ wss.on("connection", (ws, req) => {
     try {
       const data = JSON.parse(cypher(raw.toString()));
 
-      /* ===== REGISTER USER ===== */
       if (data.author) {
-        users.set(clientId, { ws, username: data.author });
-      }
-
-      /* ===== PREFIX ===== */
-      if (data.type === "get_prefix") {
-        ws.send(cypher(JSON.stringify({
-          type: "prefix_info",
-          prefix: prefixes.get(data.clientId) || ""
-        })));
-        return;
-      }
-
-      if (data.type === "set_prefix") {
-        prefixes.set(data.clientId, data.new_prefix || "");
-        ws.send(cypher(JSON.stringify({
-          type: "prefix_updated",
-          prefix: data.new_prefix || ""
-        })));
-        return;
+        users.set(clientId, data.author);
       }
 
       /* ===== TEXT ===== */
       if (data.type === "text") {
         const author = data.author;
-        const msg = data.message;
+        let msg = data.message;
 
-        /* ===== ADMIN COMMAND ===== */
-        if (msg.startsWith("admin ")) {
-          if (!ADMINS.includes(author)) {
-            ws.send(cypher(JSON.stringify({
-              type: "system",
-              message: "У вас нет прав администратора"
-            })));
-            return;
-          }
+        /* ===== COOLDOWN ===== */
+        const last = lastMessage.get(author) || 0;
+        const now = Date.now();
 
-          const args = msg.split(" ");
-          const action = args[1];
-
-          /* MUTE */
-          if (action === "mute") {
-            const target = args[2];
-            const minutes = parseInt(args[3]);
-
-            if (!target || isNaN(minutes)) {
-              ws.send(cypher(JSON.stringify({
-                type: "system",
-                message: "Использование: admin mute <ник> <минуты>"
-              })));
-              return;
-            }
-
-            const until = Date.now() + minutes * 60000;
-            mutes.set(target, until);
-            log(`MUTE ${target} ${minutes}m by ${author}`);
-
-            broadcastSystem(`Игрок ${target} замучен на ${minutes} минут`);
-            return;
-          }
-
-          /* UNMUTE */
-          if (action === "unmute") {
-            const target = args[2];
-            mutes.delete(target);
-            log(`UNMUTE ${target} by ${author}`);
-            broadcastSystem(`Игрок ${target} размучен`);
-            return;
-          }
+        if (now - last < MESSAGE_COOLDOWN) {
+          ws.send(cypher(JSON.stringify({
+            type: "system",
+            message: "Подождите 3 секунды перед следующим сообщением"
+          })));
+          return;
         }
 
-        /* ===== CHECK MUTE ===== */
-        if (mutes.has(author)) {
-          if (Date.now() < mutes.get(author)) {
-            ws.send(cypher(JSON.stringify({
-              type: "system",
-              message: "Вы замучены"
-            })));
-            return;
-          } else {
-            mutes.delete(author);
-            ws.send(cypher(JSON.stringify({
-              type: "system",
-              message: "Вы автоматически размучены"
-            })));
-          }
-        }
+        lastMessage.set(author, now);
+
+        /* ===== CAPS ===== */
+        msg = antiCaps(msg);
 
         /* ===== FILTER ===== */
         if (hasMotherInsult(msg)) {
-          log(`FILTER mother ${author}`);
+          log(`FILTER mother insult from ${author}`);
           ws.send(cypher(JSON.stringify({
             type: "system",
             message: "Запрещены оскорбления про мать"
@@ -168,6 +120,8 @@ wss.on("connection", (ws, req) => {
             c.send(cypher(JSON.stringify(outgoing)));
           }
         });
+
+        log(`MSG ${author}: ${msg}`);
       }
 
     } catch (e) {
@@ -179,15 +133,3 @@ wss.on("connection", (ws, req) => {
     log(`DISCONNECT ${clientId}`);
   });
 });
-
-/* ================= HELPERS ================= */
-function broadcastSystem(message) {
-  wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN) {
-      c.send(cypher(JSON.stringify({
-        type: "system",
-        message
-      })));
-    }
-  });
-}
