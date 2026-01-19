@@ -5,63 +5,46 @@ import crypto from "crypto";
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 
-/* ================= CONFIG ================= */
-const MESSAGE_COOLDOWN = 3000; // 3 секунды
-const ADMINS = ["HZeed", "Silv4ik", "Raze"];
+const MESSAGE_COOLDOWN = 3000;
 
-/* ================= LOG ================= */
+/* ===== LOG ===== */
 function log(text) {
   const line = `[${new Date().toISOString()}] ${text}\n`;
   console.log(text);
   fs.appendFileSync("server.log", line);
 }
 
-log("IRC server started");
-
-/* ================= XOR ================= */
+/* ===== XOR ===== */
 function cypher(input) {
   const buf = Buffer.from(input, "utf8");
   for (let i = 0; i < buf.length; i++) buf[i] ^= 0x15;
   return buf.toString("utf8");
 }
 
-/* ================= STORAGE ================= */
-const prefixes = new Map();        // clientId -> prefix
-const users = new Map();           // clientId -> username
-const lastMessage = new Map();     // username -> timestamp
-const mutes = new Map();           // username -> unmute time
+/* ===== STORAGE ===== */
+const prefixes = new Map();      // clientId -> prefix
+const lastMessage = new Map();   // clientId -> timestamp
 
-/* ================= FILTER ================= */
-const banned = [
-  "маму твою ебал",
-  "ебал твою мать",
-  "мать ебал",
-  "маму ебал",
-  "мать твою"
-];
-
-function normalize(text) {
-  return text
-    .toLowerCase()
-    .replace(/ё/g, "е")
-    .replace(/[^a-zа-я0-9\s]/gi, "");
-}
-
-function hasMotherInsult(text) {
-  const n = normalize(text);
-  return banned.some(p => n.includes(p));
-}
-
-/* ================= CAPS ================= */
+/* ===== CAPS ===== */
 function antiCaps(text) {
   const upper = text.replace(/[^A-ZА-Я]/g, "").length;
-  if (upper >= text.length * 0.6) {
-    return text.toLowerCase();
-  }
+  if (upper >= text.length * 0.6) return text.toLowerCase();
   return text;
 }
 
-/* ================= WS ================= */
+/* ===== FILTER ===== */
+const banned = ["маму твою ебал", "мать твою", "маму ебал"];
+
+function normalize(text) {
+  return text.toLowerCase().replace(/ё/g, "е");
+}
+
+function badMother(text) {
+  const n = normalize(text);
+  return banned.some(w => n.includes(w));
+}
+
+/* ===== WS ===== */
 wss.on("connection", (ws, req) => {
   const clientId = req.headers["sec-websocket-key"] || crypto.randomUUID();
   log(`CONNECT ${clientId}`);
@@ -70,49 +53,46 @@ wss.on("connection", (ws, req) => {
     try {
       const data = JSON.parse(cypher(raw.toString()));
 
-      if (data.author) {
-        users.set(clientId, data.author);
+      /* ===== PREFIX ===== */
+      if (data.type === "get_prefix") {
+        ws.send(cypher(JSON.stringify({
+          type: "prefix_info",
+          prefix: prefixes.get(clientId) || ""
+        })));
+        return;
       }
 
       /* ===== TEXT ===== */
       if (data.type === "text") {
-        const author = data.author;
-        let msg = data.message;
-
-        /* ===== COOLDOWN ===== */
-        const last = lastMessage.get(author) || 0;
         const now = Date.now();
+        const last = lastMessage.get(clientId) || 0;
 
         if (now - last < MESSAGE_COOLDOWN) {
           ws.send(cypher(JSON.stringify({
             type: "system",
-            message: "Подождите 3 секунды перед следующим сообщением"
+            message: "⏳ Подождите 3 секунды перед следующим сообщением"
           })));
           return;
         }
 
-        lastMessage.set(author, now);
+        lastMessage.set(clientId, now);
 
-        /* ===== CAPS ===== */
-        msg = antiCaps(msg);
+        let msg = antiCaps(data.message || "");
 
-        /* ===== FILTER ===== */
-        if (hasMotherInsult(msg)) {
-          log(`FILTER mother insult from ${author}`);
+        if (badMother(msg)) {
           ws.send(cypher(JSON.stringify({
             type: "system",
-            message: "Запрещены оскорбления про мать"
+            message: "🚫 Оскорбления про мать запрещены"
           })));
           return;
         }
 
-        /* ===== SEND ===== */
         const outgoing = {
           id: crypto.randomUUID(),
           type: "text",
-          author,
+          author: data.author || "unknown",
           message: msg,
-          prefix: prefixes.get(data.clientId) || ""
+          prefix: prefixes.get(clientId) || ""
         };
 
         wss.clients.forEach(c => {
@@ -121,11 +101,11 @@ wss.on("connection", (ws, req) => {
           }
         });
 
-        log(`MSG ${author}: ${msg}`);
+        log(`MSG ${data.author}: ${msg}`);
       }
 
     } catch (e) {
-      log(`ERROR ${e.message}`);
+      log("ERROR " + e.message);
     }
   });
 
