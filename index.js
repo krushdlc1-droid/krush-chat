@@ -5,7 +5,7 @@ const wss = new WebSocketServer({ port: PORT });
 
 console.log("WebSocket IRC server started");
 
-// XOR (как в Java)
+// ===== XOR (как в Java) =====
 function cypher(input) {
   const buf = Buffer.from(input, 'utf8');
   for (let i = 0; i < buf.length; i++) {
@@ -47,16 +47,21 @@ wss.on('connection', (ws, req) => {
 
       // ===== TEXT =====
       if (data.type === "text") {
+
+        // ✅ ВАЖНО: уникальный ID сообщения
         const outgoing = {
           type: "text",
+          id: Date.now().toString() + "_" + Math.random().toString(36).slice(2),
           author: data.author || "unknown",
           message: data.message || "",
           prefix: prefixes.get(data.clientId) || ""
         };
 
+        const encoded = cypher(JSON.stringify(outgoing));
+
         wss.clients.forEach(c => {
           if (c.readyState === WebSocket.OPEN) {
-            c.send(cypher(JSON.stringify(outgoing)));
+            c.send(encoded);
           }
         });
       }
