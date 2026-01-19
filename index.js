@@ -1,11 +1,11 @@
-const WebSocket = require('ws');
+import WebSocket, { WebSocketServer } from 'ws';
 
 const PORT = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port: PORT });
+const wss = new WebSocketServer({ port: PORT });
 
 console.log("WebSocket IRC server started");
 
-// XOR шифрование / дешифрование (как в Java)
+// XOR (как в Java)
 function cypher(input) {
   const buf = Buffer.from(input, 'utf8');
   for (let i = 0; i < buf.length; i++) {
@@ -14,62 +14,51 @@ function cypher(input) {
   return buf.toString('utf8');
 }
 
-// Храним префиксы по clientId
+// clientId -> prefix
 const prefixes = new Map();
 
 wss.on('connection', (ws, req) => {
   const clientId = req.headers['sec-websocket-key'] || 'unknown';
-
   console.log("Client connected:", clientId);
 
-  ws.on('message', (rawMessage) => {
+  ws.on('message', (raw) => {
     try {
-      // 🔓 расшифровываем
-      const decoded = cypher(rawMessage.toString());
+      const decoded = cypher(raw.toString());
       const data = JSON.parse(decoded);
 
-      // ====== GET PREFIX ======
+      // ===== GET PREFIX =====
       if (data.type === "get_prefix") {
-        const prefix = prefixes.get(data.clientId) || "";
-        const response = {
+        ws.send(cypher(JSON.stringify({
           type: "prefix_info",
-          prefix: prefix
-        };
-        ws.send(cypher(JSON.stringify(response)));
+          prefix: prefixes.get(data.clientId) || ""
+        })));
         return;
       }
 
-      // ====== SET PREFIX ======
+      // ===== SET PREFIX =====
       if (data.type === "set_prefix") {
         prefixes.set(data.clientId, data.new_prefix || "");
-        const response = {
+        ws.send(cypher(JSON.stringify({
           type: "prefix_updated",
           prefix: data.new_prefix || ""
-        };
-
-        // отправляем только этому клиенту
-        ws.send(cypher(JSON.stringify(response)));
+        })));
         return;
       }
 
-      // ====== TEXT MESSAGE ======
+      // ===== TEXT =====
       if (data.type === "text") {
-        const prefix = prefixes.get(data.clientId) || "";
-
         const outgoing = {
           type: "text",
           author: data.author || "unknown",
           message: data.message || "",
-          prefix: prefix
+          prefix: prefixes.get(data.clientId) || ""
         };
 
-        // 📢 рассылаем ВСЕМ
-        wss.clients.forEach(client => {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(cypher(JSON.stringify(outgoing)));
+        wss.clients.forEach(c => {
+          if (c.readyState === WebSocket.OPEN) {
+            c.send(cypher(JSON.stringify(outgoing)));
           }
         });
-        return;
       }
 
     } catch (e) {
@@ -79,9 +68,5 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     console.log("Client disconnected:", clientId);
-  });
-
-  ws.on('error', (err) => {
-    console.log("WebSocket error:", err.message);
   });
 });
