@@ -1,12 +1,11 @@
 {
   "name": "krush-chat",
   "version": "1.0.0",
-  "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "ws": "^8.15.1"
+    "ws": "^8.16.0"
   }
 }
