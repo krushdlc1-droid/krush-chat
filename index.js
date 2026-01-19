@@ -1,115 +1,142 @@
 import WebSocket, { WebSocketServer } from "ws";
 import fs from "fs";
-import crypto from "crypto";
 
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 
-const MESSAGE_COOLDOWN = 3000;
+console.log("WebSocket IRC server started");
 
-/* ===== LOG ===== */
-function log(text) {
-  const line = `[${new Date().toISOString()}] ${text}\n`;
-  console.log(text);
-  fs.appendFileSync("server.log", line);
-}
+// ================= НАСТРОЙКИ =================
+const MESSAGE_COOLDOWN = 3000; // 3 сек
+const MAX_MESSAGE_LENGTH = 200;
 
-/* ===== XOR ===== */
+// clientId -> prefix
+const prefixes = new Map();
+
+// clientId -> lastMessageTime
+const lastMessageTime = new Map();
+
+// ============================================
+
+// XOR (как в Java)
 function cypher(input) {
   const buf = Buffer.from(input, "utf8");
-  for (let i = 0; i < buf.length; i++) buf[i] ^= 0x15;
+  for (let i = 0; i < buf.length; i++) {
+    buf[i] = buf[i] ^ 0x15;
+  }
   return buf.toString("utf8");
 }
 
-/* ===== STORAGE ===== */
-const prefixes = new Map();      // clientId -> prefix
-const lastMessage = new Map();   // clientId -> timestamp
+// Антикапс: если >70% букв — капс → в lowerCase
+function normalizeCaps(text) {
+  const letters = text.replace(/[^a-zA-Zа-яА-Я]/g, "");
+  if (!letters.length) return text;
 
-/* ===== CAPS ===== */
-function antiCaps(text) {
-  const upper = text.replace(/[^A-ZА-Я]/g, "").length;
-  if (upper >= text.length * 0.6) return text.toLowerCase();
-  return text;
+  const upper = letters.replace(/[^A-ZА-Я]/g, "").length;
+  const percent = upper / letters.length;
+
+  return percent > 0.7 ? text.toLowerCase() : text;
 }
 
-/* ===== FILTER ===== */
-const banned = ["маму твою ебал", "мать твою", "маму ебал"];
-
-function normalize(text) {
-  return text.toLowerCase().replace(/ё/g, "е");
-}
-
-function badMother(text) {
-  const n = normalize(text);
-  return banned.some(w => n.includes(w));
-}
-
-/* ===== WS ===== */
 wss.on("connection", (ws, req) => {
-  const clientId = req.headers["sec-websocket-key"] || crypto.randomUUID();
-  log(`CONNECT ${clientId}`);
+  const clientId = req.headers["sec-websocket-key"] || "unknown";
+  console.log("Client connected:", clientId);
 
-  ws.on("message", raw => {
+  ws.on("message", (raw) => {
     try {
-      const data = JSON.parse(cypher(raw.toString()));
+      const decoded = cypher(raw.toString());
+      const data = JSON.parse(decoded);
 
-      /* ===== PREFIX ===== */
+      // ===== GET PREFIX =====
       if (data.type === "get_prefix") {
-        ws.send(cypher(JSON.stringify({
-          type: "prefix_info",
-          prefix: prefixes.get(clientId) || ""
-        })));
+        ws.send(
+          cypher(
+            JSON.stringify({
+              type: "prefix_info",
+              prefix: prefixes.get(data.clientId) || "",
+            })
+          )
+        );
         return;
       }
 
-      /* ===== TEXT ===== */
+      // ===== SET PREFIX =====
+      if (data.type === "set_prefix") {
+        prefixes.set(data.clientId, data.new_prefix || "");
+        ws.send(
+          cypher(
+            JSON.stringify({
+              type: "prefix_updated",
+              prefix: data.new_prefix || "",
+            })
+          )
+        );
+        return;
+      }
+
+      // ===== TEXT =====
       if (data.type === "text") {
         const now = Date.now();
-        const last = lastMessage.get(clientId) || 0;
+        const last = lastMessageTime.get(data.clientId) || 0;
 
+        // ⏳ КД 3 сек с таймером
         if (now - last < MESSAGE_COOLDOWN) {
-          ws.send(cypher(JSON.stringify({
-            type: "system",
-            message: "⏳ Подождите 3 секунды перед следующим сообщением"
-          })));
+          const remainMs = MESSAGE_COOLDOWN - (now - last);
+          const remainSec = Math.ceil(remainMs / 1000);
+
+          ws.send(
+            cypher(
+              JSON.stringify({
+                type: "system",
+                message: `⏳ Подождите ещё ${remainSec} сек`,
+              })
+            )
+          );
           return;
         }
 
-        lastMessage.set(clientId, now);
+        lastMessageTime.set(data.clientId, now);
 
-        let msg = antiCaps(data.message || "");
+        let message = data.message || "";
 
-        if (badMother(msg)) {
-          ws.send(cypher(JSON.stringify({
-            type: "system",
-            message: "🚫 Оскорбления про мать запрещены"
-          })));
+        // 📏 лимит длины
+        if (message.length > MAX_MESSAGE_LENGTH) {
+          ws.send(
+            cypher(
+              JSON.stringify({
+                type: "system",
+                message: `❌ Сообщение слишком длинное (макс ${MAX_MESSAGE_LENGTH})`,
+              })
+            )
+          );
           return;
         }
+
+        // 🔤 антикапс
+        message = normalizeCaps(message);
 
         const outgoing = {
-          id: crypto.randomUUID(),
           type: "text",
+          id: `${data.clientId}_${now}`, // защита от дублей
           author: data.author || "unknown",
-          message: msg,
-          prefix: prefixes.get(clientId) || ""
+          message,
+          prefix: prefixes.get(data.clientId) || "",
         };
 
-        wss.clients.forEach(c => {
+        wss.clients.forEach((c) => {
           if (c.readyState === WebSocket.OPEN) {
             c.send(cypher(JSON.stringify(outgoing)));
           }
         });
-
-        log(`MSG ${data.author}: ${msg}`);
       }
-
     } catch (e) {
-      log("ERROR " + e.message);
+      console.log("Message error:", e.message);
     }
   });
 
   ws.on("close", () => {
-    log(`DISCONNECT ${clientId}`);
+    console.log("Client disconnected:", clientId);
   });
 });
+
+console.log("Listening on port", PORT);
